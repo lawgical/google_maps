@@ -15,7 +15,7 @@ module GoogleMap
       :map_type,
       :ssl,
       :street_view
-      
+
     STATIC_MAP_TYPES = {
       'G_NORMAL_MAP' => 'roadmap',
       'G_SATELLITE_MAP' => 'satellite',
@@ -35,15 +35,11 @@ module GoogleMap
       self.ssl = false
       options.each_pair { |key, value| send("#{key}=", value) }
     end
-    
+
     def static_img(width = 400, height = 400, options = {})
+      require 'open-uri'
       url = []
-      
-      if( self.ssl )
-        url << "https://maps-api-ssl.google.com/maps/api/staticmap?sensor=false&client=#{GOOGLE_CLIENT_ID}"
-      else
-        url << "http://maps.google.com/maps/api/staticmap?sensor=false&key=#{GOOGLE_APPLICATION_ID}"
-      end
+
       url << "zoom=#{self.zoom}" if self.zoom
       url << "size=#{width}x#{height}"
       url << "center=#{center.to_static_param}" if self.center
@@ -53,7 +49,7 @@ module GoogleMap
       self.overlays.each do |overlay|
         url << overlay.to_static_param if overlay.is_a? GoogleMap::Polyline
       end
-      
+
       if STATIC_MAP_TYPES.include?(self.map_type)
         options[:maptype] ||= STATIC_MAP_TYPES[self.map_type]
       elsif STATIC_MAP_TYPES.has_value?(self.map_type)
@@ -63,7 +59,42 @@ module GoogleMap
       end
       options[:format] ||= 'png'
       options.each_pair { |key, value| url << "#{key}=#{value}"}
-      return url.join("&")
+
+      if( self.ssl )
+        url.unshift "https://maps-api-ssl.google.com/maps/api/staticmap?sensor=false&client=#{GOOGLE_CLIENT_ID}"
+        url << "signature=" + GoogleMap::Map.static_map_signature(url.join("&"), GOOGLE_MAPS_PRIVATE_KEY)
+      else
+        url.unshift "http://maps.google.com/maps/api/staticmap?sensor=false&key=#{GOOGLE_APPLICATION_ID}"
+      end
+
+      return URI.encode(url.join("&"))
+    end
+
+    def self.static_map_signature(url, private_key)
+      # Details on why this is necessary:
+      # http://code.google.com/apis/maps/documentation/premier/guide.html#URLSigning
+      require 'base64'
+      require 'hmac-sha1'
+      require 'open-uri'
+      # The google-supplied private key needs to be converted
+      # to it's binary format.  It is currently in a 'modified'
+      # Base64 encoding for URL's, requiring the following
+      # replacements
+      pk = private_key.gsub('-', '+').gsub('_', '/')
+      decoded_key = Base64.decode64(pk)
+
+      # The signature uses the url path and query
+      uri = URI.parse(URI.encode(url))
+      url_to_sign = "#{uri.path}?#{uri.query}"
+
+      # Generate a signature for google to validate against using
+      # the sha1-hmac algorithm.  Is returned in binary format.
+      signature = HMAC::SHA1.digest(decoded_key, url_to_sign)
+
+      # Converts the signature into readable characters, and performs the 'url-friendly' substitutions
+      encoded_signature = Base64.encode64(signature).gsub('+', '-').gsub('/', '_').strip
+
+      return encoded_signature
     end
 
     def to_html
@@ -74,7 +105,7 @@ module GoogleMap
       else
         html << "<script src='http://maps.google.com/maps?file=api&amp;v=2&amp;key=#{GOOGLE_APPLICATION_ID}' type='text/javascript'></script>"
       end
-      html << "<script type=\"text/javascript\">\n/* <![CDATA[ */\n"  
+      html << "<script type=\"text/javascript\">\n/* <![CDATA[ */\n"
       html << to_js
       html << "/* ]]> */</script> "
 
@@ -92,13 +123,13 @@ module GoogleMap
       js << "var #{dom_id};"
       js << "var markerClicked = false;"
       markers.each { |marker| js << "var #{marker.dom_id};" }
-      
+
 
       js << street_view_js
       js << center_map_js
       js << markers_functions_js
       js << custom_controls_js
-      
+
       overlays.each do |overlay|
         js << overlay.to_js
       end
@@ -110,7 +141,7 @@ module GoogleMap
       js << "    if (self['GoogleMapOnLoad']) {"
       js << "      #{dom_id}.load = GEvent.addListener(#{dom_id},'load',GoogleMapOnLoad);"
       js << "    }"
-      
+
       js << "    initialize_google_street_view_#{street_view.dom_id}();" if self.street_view
 
       js << '    ' + map_type_js
@@ -144,7 +175,7 @@ module GoogleMap
       js << "} else {"
       js << "  old_before_google_map_#{dom_id} = window.onload;"
       # In my testing the following doesn't actually appear to work...?
-      js << "  window.onload = function() {" 
+      js << "  window.onload = function() {"
       js << "    old_before_google_map_#{dom_id}();"
       js << "    initialize_google_map_#{dom_id}();"
       js << "  }"
@@ -155,9 +186,9 @@ module GoogleMap
       #js << "  window.onunload = GUnload();"
       #js << "} else {"
       #js << "  old_before_onunload = window.onload;"
-      #js << "  window.onunload = function() {" 
+      #js << "  window.onunload = function() {"
       #js << "    old_before_onunload();"
-      #js << "    GUnload();" 
+      #js << "    GUnload();"
       #js << "  }"
       #js << "}"
 
@@ -168,7 +199,7 @@ module GoogleMap
       js = []
       if map_type
         js << "#{dom_id}.setMapType(#{map_type});"
-      end    
+      end
       js.join("\n")
     end
 
@@ -206,25 +237,25 @@ module GoogleMap
             raise "Unknown control type:  #{control}"
           end
         end
-        
+
         js << "#{dom_id}.addControl(new #{c}());" if c
       end
 
       return js.join("\n")
     end
-    
+
     def custom_controls_js
       js = []
-      
+
      controls.each do |control|
         if control.is_a?(GoogleMap::CustomControl)
           js << control.to_js
         end
       end
-      
+
       return js.join("\n")
     end
-    
+
     def street_view_js
       js = []
       if controls.include? :street_view
@@ -242,6 +273,7 @@ module GoogleMap
     def markers_functions_js
       js = []
       for marker in markers
+        js << marker.setup_vars
         js << marker.open_info_window_function
       end
       return js.join("\n")
@@ -251,7 +283,7 @@ module GoogleMap
       icons = []
       for marker in markers
         if marker.icon and !icons.include?(marker.icon)
-          icons << marker.icon 
+          icons << marker.icon
         end
       end
       js = []
@@ -268,10 +300,10 @@ module GoogleMap
       if self.zoom
         zoom_js = zoom
       else
-        zoom_js = "#{dom_id}.getBoundsZoomLevel(#{dom_id}_latlng_bounds)"
+        zoom_js = "#{dom_id}.getBoundsZoomLevel(#{dom_id}_latlng_bounds) - 1"
       end
       set_center_js = []
-      
+
       if self.center
         # Also set a 'default' lat/lng on the street view if available, as our center point
         if self.street_view
@@ -282,31 +314,31 @@ module GoogleMap
       else
         synch_bounds
         set_center_js << "var #{dom_id}_latlng_bounds = new GLatLngBounds();"
-        
+
         bounds.each do |point|
           set_center_js << "#{dom_id}_latlng_bounds.extend(new GLatLng(#{point.lat}, #{point.lng}));"
-        end  
-        
+        end
+
         set_center_js << "#{dom_id}.setCenter(#{dom_id}_latlng_bounds.getCenter(), #{zoom_js});"
       end
-      
+
       "function center_#{dom_id}() {\n  #{check_resize_js}\n  #{set_center_js.join "\n"}\n}"
     end
 
     def synch_bounds
-      
+
       overlays.each do |overlay|
         if overlay.is_a? GoogleMap::Polyline
           overlay.vertices.each do |v|
             bounds << v #i do not like this inconsistent interface
-          end 
+          end
         end
       end
-      
+
       markers.each do |m|
         bounds << m
-      end    
-      
+      end
+
       bounds.uniq!
     end
 
@@ -321,7 +353,7 @@ module GoogleMap
     def div(width = '100%', height = '100%')
       "<div id='#{dom_id}' style='width: #{width}; height: #{height}'></div>"
     end
-    
+
     def noflash_div(width = '100%')
       "<div id='#{dom_id}_no_flash' style='width: #{width}'></div>"
     end

@@ -21,21 +21,32 @@ module GoogleMap
                   :color, # 0xFFFFCC format, or one of:
                           # black, brown, green, purple, yellow, blue, gray, orange, red, white
                           # transparency not supported for markers
-                  :click_street_view
+                  :click_street_view,
+                  :street_view_link # Appends to the html a link to open street view.
+                                    # Needs to be a hash in the form of {:text => 'Street View', :face_point => true}
 
     def initialize(options = {})
       self.click_street_view = false
       options.each_pair { |key, value| send("#{key}=", value) }
-      
+
       if lat.blank? or lng.blank? or !map or !map.kind_of?(GoogleMap::Map)
         raise "Must set lat, lng, and map for GoogleMapMarker."
       end
-      
+
+      if street_view_link && !map.street_view
+        self.map.street_view = GoogleMap::StreetView.new(:map => map, :dom_id => map.dom_id, :close_control => true)
+      end
+
       if dom_id.blank?
-        # This needs self to set the attr_accessor, why?
         self.dom_id = "#{map.dom_id}_marker_#{map.markers.size + 1}"
       end
-      
+
+    end
+
+    def setup_vars
+      js = []
+      js << "#{dom_id}_marker_html = null;"
+      js.join("\n")
     end
 
     def open_info_window_function
@@ -50,20 +61,40 @@ module GoogleMap
       js << "      setTimeout('markerClicked = false;', 100);"
       js << "    }"
       js << "  };"
-      js << "  #{map.dom_id}.openInfoWindowHtml(new GLatLng( #{lat}, #{lng} ), \"#{escape_javascript(html)}\", windowOptions);" if self.html
-      js << "  if(!markerClicked) {"
-      js << "    markerClicked = true;"
-      # Without this boolean toggle, the map will register two clicks:
-      # one for the marker, and one on the map.  This prevents the
-      # incorrect location being set
-      js << "    setTimeout('markerClicked = false;', 100);" if !self.html
+
+      js << %{ marker_html = "#{escape_javascript(html)}";}
+
+      js << "  if(#{dom_id}_marker_html) {"
+      js << "    #{map.dom_id}.openInfoWindowHtml(new GLatLng( #{lat}, #{lng} ), #{dom_id}_marker_html, windowOptions);"
+      js << "  }else{"
+        if map.street_view && street_view_link
+          js << "#{map.street_view.dom_id}_street_view_client.getNearestPanorama(new GLatLng(#{lat}, #{lng}), function(panoData) {"
+          js << "  if( panoData.code != 200 ) {"
+          js << "    #{dom_id}_marker_html = marker_html;"
+          js << "    #{map.dom_id}.openInfoWindowHtml(new GLatLng( #{lat}, #{lng} ), #{dom_id}_marker_html, windowOptions);" if html
+          js << "  }else {"
+          js << "    function_link = '#{map.street_view.dom_id}_street_view_go#{street_view_link[:face_point] ? '_with_POV' : ''}(new GLatLng( #{lat}, #{lng} )); return false;';"
+          js << %{   #{dom_id}_marker_html = marker_html + "<br /><a onclick='" + function_link + "' href='#'>#{escape_javascript(street_view_link[:text])}</a>";}
+          js << "  #{map.dom_id}.openInfoWindowHtml(new GLatLng( #{lat}, #{lng} ), #{dom_id}_marker_html, windowOptions);"
+          js <<   "}"
+          js << "});"
+        else
+          js << "  #{dom_id}_marker_html = marker_html;"
+          js << "  #{map.dom_id}.openInfoWindowHtml(new GLatLng( #{lat}, #{lng} ), #{dom_id}_marker_html, windowOptions);" if html
+
+          js << "  if(!markerClicked) {"
+          js << "    markerClicked = true;"
+          # Without this boolean toggle, the map will register two clicks:
+          # one for the marker, and one on the map.  This prevents the
+          # incorrect location being set
+          js << "    setTimeout('markerClicked = false;', 100);" if !self.html
+          js << "  }"
+
+          if self.map.street_view && self.click_street_view
+            js << "  #{self.map.street_view.dom_id}_street_view_go_with_POV(my_loc);"
+          end
+        end
       js << "  }"
-      
-      if self.map.street_view && self.click_street_view
-        js << "  my_loc = new GLatLng( #{lat}, #{lng} );"
-        js << "  #{self.map.street_view.dom_id}_street_view_go_with_POV(my_loc);"
-      end
-      
       js << "}"
 
       return js.join("\n")
@@ -81,12 +112,12 @@ module GoogleMap
       # If a icon is specified, use it in marker creation.
       i = ", { icon: #{icon.dom_id} #{h} }" if icon
       i = ", { icon: new GIcon( G_DEFAULT_ICON, '#{marker_icon_path}') #{h} }" if marker_icon_path
-		
+
       options = ', { draggable: true }' if self.draggable
       js << "#{dom_id} = new GMarker( new GLatLng( #{lat}, #{lng} ) #{i} #{options} );"
       js << "GEvent.bind(#{dom_id}, \"dragstart\", #{dom_id}, #{self.dragstart});" if dragstart
       js << "GEvent.bind(#{dom_id}, \"dragend\", #{dom_id}, #{self.dragend});" if dragend
-      
+
       if self.html
         js << "GEvent.addListener(#{dom_id}, 'click', function() {#{dom_id}_infowindow_function()});"
       end
@@ -99,10 +130,10 @@ module GoogleMap
 
       return js.join("\n")
     end
-    
+
     def to_static_param
       param = []
-      
+
       param << "size:#{size}" if self.size
       param << "color:#{color}" if self.color
       param << self.icon.to_static_param if self.icon.instance_of?(LetterIcon)
